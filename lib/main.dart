@@ -81,7 +81,11 @@ class WebViewPage extends StatefulWidget {
   final String title;
   final String initialUrl;
 
-  const WebViewPage({super.key, required this.title, required this.initialUrl});
+  const WebViewPage({
+    super.key,
+    required this.title,
+    required this.initialUrl,
+  });
 
   @override
   State<WebViewPage> createState() => _WebViewPageState();
@@ -110,18 +114,52 @@ class _WebViewPageState extends State<WebViewPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.title),
-      ),
-      body: Stack(
-        children: [
-          WebViewWidget(controller: _controller),
-          if (_isLoading)
-            const Center(
-              child: CircularProgressIndicator(),
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) async {
+        if (didPop) return;
+
+        // Wenn im WebView eine vorherige Seite existiert, geh im Verlauf zurück
+        if (await _controller.canGoBack()) {
+          await _controller.goBack();
+        } else {
+          // Wenn wir auf der ersten Seite sind, verlasse die WebView-Aktivität
+          if (context.mounted) {
+            Navigator.of(context).pop();
+          }
+        }
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text(widget.title),
+          actions: [
+            // 1. In-App Verlauf-Zurück
+            IconButton(
+              icon: const Icon(Icons.arrow_back),
+              onPressed: () async {
+                if (await _controller.canGoBack()) {
+                  await _controller.goBack();
+                }
+              },
             ),
-        ],
+            // 2. Neuladen
+            IconButton(
+              icon: const Icon(Icons.refresh),
+              onPressed: () {
+                _controller.reload();
+              },
+            ),
+          ],
+        ),
+        body: Stack(
+          children: [
+            WebViewWidget(controller: _controller),
+            if (_isLoading)
+              const Center(
+                child: CircularProgressIndicator(),
+              ),
+          ],
+        ),
       ),
     );
   }
