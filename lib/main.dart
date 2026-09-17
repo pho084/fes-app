@@ -16,12 +16,23 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    const primaryColor = Color(0xFF1A5276); // Schul-Blau
+
     return MaterialApp(
-      title: 'FES Schul-App',
+      title: 'FES-APP',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: primaryColor,
+          brightness: Brightness.light,
+        ),
+        scaffoldBackgroundColor: const Color(0xFFF4F6F7),
         useMaterial3: true,
+        appBarTheme: const AppBarTheme(
+          backgroundColor: primaryColor,
+          foregroundColor: Colors.white,
+          elevation: 2,
+        ),
       ),
       home: const DashboardPage(),
     );
@@ -29,7 +40,7 @@ class MyApp extends StatelessWidget {
 }
 
 // ==========================================
-// 1. DASHBOARD GRID (REIHENFOLGE GEÄNDERT)
+// 1. DASHBOARD GRID (GRÖSSERES LOGO)
 // ==========================================
 class DashboardPage extends StatelessWidget {
   const DashboardPage({super.key});
@@ -38,43 +49,88 @@ class DashboardPage extends StatelessWidget {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('FES Pforzheim'),
+        title: const Text(
+          'FES-APP',
+          style: TextStyle(fontWeight: FontWeight.bold, letterSpacing: 1.1),
+        ),
         centerTitle: true,
       ),
       body: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: GridView.count(
-          crossAxisCount: 2,
-          crossAxisSpacing: 16,
-          mainAxisSpacing: 16,
+        padding: const EdgeInsets.all(20.0),
+        child: Column(
           children: [
-            _buildTile(
-              context,
-              title: 'Moodle',
-              icon: Icons.school,
-              color: Colors.orange,
-              url: 'https://moodle.fes-pforzheim.de/moodle/',
+            // Logo-Container mit mehr Höhe
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(vertical: 5, horizontal: 20),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(16),
+                boxShadow: const [
+                  BoxShadow(
+                    color: Colors.black12,
+                    blurRadius: 6,
+                    offset: Offset(0, 3),
+                  ),
+                ],
+              ),
+              child: Image.asset(
+                'assets/images/fes_logo.png',
+                height: 200, // logo höhe
+                fit: BoxFit.contain,
+                errorBuilder: (context, error, stackTrace) => const Icon(
+                  Icons.school,
+                  size: 60,
+                  color: Color(0xFF1A5276),
+                ),
+              ),
             ),
-            _buildTile(
-              context,
-              title: 'Vertretungsplan',
-              icon: Icons.calendar_today,
-              color: Colors.green,
-              url: 'https://moodle.fes-pforzheim.de/moodle/course/view.php?id=1517',
+            const SizedBox(height: 16),
+            const Text(
+              'Wähle einen Bereich aus:',
+              style: TextStyle(
+                fontSize: 14,
+                color: Colors.grey,
+                fontWeight: FontWeight.w500,
+              ),
             ),
-            _buildTile(
-              context,
-              title: 'Krankmeldung',
-              icon: Icons.assignment_turned_in,
-              color: Colors.red,
-              url: 'https://www.fes-pforzheim.de/entschuldigungsformular',
-            ),
-            _buildTile(
-              context,
-              title: 'Homepage',
-              icon: Icons.language,
-              color: Colors.blue,
-              url: 'https://fes-pforzheim.de',
+            const SizedBox(height: 16),
+            Expanded(
+              child: GridView.count(
+                crossAxisCount: 2,
+                crossAxisSpacing: 16,
+                mainAxisSpacing: 16,
+                children: [
+                  _buildTile(
+                    context,
+                    title: 'Moodle',
+                    icon: Icons.school_rounded,
+                    color: const Color(0xFFE67E22),
+                    url: 'https://moodle.fes-pforzheim.de/moodle/',
+                  ),
+                  _buildTile(
+                    context,
+                    title: 'Vertretungsplan',
+                    icon: Icons.calendar_month_rounded,
+                    color: const Color(0xFF27AE60),
+                    url: 'https://moodle.fes-pforzheim.de/moodle/course/view.php?id=1517',
+                  ),
+                  _buildTile(
+                    context,
+                    title: 'Krankmeldung',
+                    icon: Icons.assignment_turned_in_rounded,
+                    color: const Color(0xFFC0392B),
+                    url: 'https://www.fes-pforzheim.de/entschuldigungsformular',
+                  ),
+                  _buildTile(
+                    context,
+                    title: 'Homepage',
+                    icon: Icons.language_rounded,
+                    color: const Color(0xFF2980B9),
+                    url: 'https://fes-pforzheim.de',
+                  ),
+                ],
+              ),
             ),
           ],
         ),
@@ -90,32 +146,44 @@ class DashboardPage extends StatelessWidget {
     required String url,
   }) {
     return Card(
-      elevation: 4,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      elevation: 2,
+      shadowColor: Colors.black12,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       child: InkWell(
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(16),
         onTap: () {
           Navigator.push(
             context,
             MaterialPageRoute(
-              builder: (context) => WebViewPage(initialUrl: url),
+              builder: (context) => WebViewPage(initialUrl: url, title: title),
             ),
           );
         },
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(icon, size: 48, color: color),
-            const SizedBox(height: 12),
-            Text(
-              title,
-              textAlign: TextAlign.center,
-              style: const TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.bold,
+        child: Padding(
+          padding: const EdgeInsets.all(12.0),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: color.withOpacity(0.1),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(icon, size: 36, color: color),
               ),
-            ),
-          ],
+              const SizedBox(height: 12),
+              Text(
+                title,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFF34495E),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -123,11 +191,12 @@ class DashboardPage extends StatelessWidget {
 }
 
 // ==========================================
-// 2. WEBVIEW ENGINE & NATIVE DOWNLOAD BRIDGE
+// 2. WEBVIEW ENGINE & DUAL ROUTING HANDLER
 // ==========================================
 class WebViewPage extends StatefulWidget {
   final String initialUrl;
-  const WebViewPage({super.key, required this.initialUrl});
+  final String title;
+  const WebViewPage({super.key, required this.initialUrl, required this.title});
 
   @override
   State<WebViewPage> createState() => _WebViewPageState();
@@ -160,14 +229,11 @@ class _WebViewPageState extends State<WebViewPage> {
             final url = request.url;
             final lowerUrl = url.toLowerCase();
 
-            // Vertretungsplan / HTML-Ressourcen explizit erlauben!
-            // Wenn der Link auf eine HTML-Ansicht oder Kurs-View zeigt -> normal laden
             if (lowerUrl.contains('redirect=1') || 
                 (lowerUrl.contains('/mod/resource/view.php') && !lowerUrl.contains('forcedownload=1'))) {
               return NavigationDecision.navigate;
             }
 
-            // Nur echte Downloads abfangen (pluginfile.php, forcedownload=1, direkte Dateiendungen)
             bool isDownload = lowerUrl.contains('forcedownload=1') ||
                 (lowerUrl.contains('pluginfile.php') && 
                  !lowerUrl.contains('.html') && 
@@ -240,8 +306,8 @@ class _WebViewPageState extends State<WebViewPage> {
       if (!fileName.contains('.')) fileName = '$fileName.bin';
 
       final bytes = base64Decode(base64Data);
-      final dir = await getTemporaryDirectory();
-      final file = File('${dir.path}/$fileName');
+      final tempDir = await getTemporaryDirectory();
+      final file = File('${tempDir.path}/$fileName');
       await file.writeAsBytes(bytes);
 
       final result = await OpenFilex.open(file.path);
@@ -271,7 +337,7 @@ class _WebViewPageState extends State<WebViewPage> {
       },
       child: Scaffold(
         appBar: AppBar(
-          title: const Text('FES Schul-App'),
+          title: Text(widget.title),
           leading: IconButton(
             icon: const Icon(Icons.arrow_back),
             onPressed: () async {
@@ -285,10 +351,12 @@ class _WebViewPageState extends State<WebViewPage> {
           actions: [
             IconButton(
               icon: const Icon(Icons.home),
+              tooltip: 'Zum Dashboard',
               onPressed: () => Navigator.of(context).pop(),
             ),
             IconButton(
               icon: const Icon(Icons.refresh),
+              tooltip: 'Neu laden',
               onPressed: () => _controller.reload(),
             ),
           ],
