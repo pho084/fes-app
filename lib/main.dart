@@ -5,6 +5,9 @@ import 'package:open_filex/open_filex.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+//plattformspezifische Cookie-Steuerung:
+import 'package:webview_flutter_android/webview_flutter_android.dart';
+import 'package:webview_flutter_wkwebview/webview_flutter_wkwebview.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -206,49 +209,59 @@ class _WebViewPageState extends State<WebViewPage> {
   late final WebViewController _controller;
   bool _isLoading = true;
 
-  @override
-  void initState() {
-    super.initState();
-    _controller = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..addJavaScriptChannel(
-        'FileDownloader',
-        onMessageReceived: (JavaScriptMessage message) {
-          _handleDownloadedData(message.message);
+@override
+void initState() {
+  super.initState();
+  _controller = WebViewController()
+    ..setJavaScriptMode(JavaScriptMode.unrestricted)
+    ..addJavaScriptChannel(
+      'FileDownloader',
+      onMessageReceived: (JavaScriptMessage message) {
+        _handleDownloadedData(message.message);
+      },
+    )
+    ..setNavigationDelegate(
+      NavigationDelegate(
+        onPageStarted: (_) {
+          if (mounted) setState(() => _isLoading = true);
         },
-      )
-      ..setNavigationDelegate(
-        NavigationDelegate(
-          onPageStarted: (_) {
-            if (mounted) setState(() => _isLoading = true);
-          },
-          onPageFinished: (_) {
-            if (mounted) setState(() => _isLoading = false);
-          },
-          onNavigationRequest: (NavigationRequest request) async {
-            final url = request.url;
-            final lowerUrl = url.toLowerCase();
+        onPageFinished: (_) {
+          if (mounted) setState(() => _isLoading = false);
+        },
+        onNavigationRequest: (NavigationRequest request) async {
+          final url = request.url;
+          final lowerUrl = url.toLowerCase();
 
-            if (lowerUrl.contains('redirect=1') || 
-                (lowerUrl.contains('/mod/resource/view.php') && !lowerUrl.contains('forcedownload=1'))) {
-              return NavigationDecision.navigate;
-            }
-
-            bool isDownload = lowerUrl.contains('forcedownload=1') ||
-                (lowerUrl.contains('pluginfile.php') && 
-                 !lowerUrl.contains('.html') && 
-                 !lowerUrl.contains('.htm'));
-
-            if (isDownload) {
-              _triggerJsDownload(url);
-              return NavigationDecision.prevent;
-            }
-
+          if (lowerUrl.contains('redirect=1') || 
+              (lowerUrl.contains('/mod/resource/view.php') && !lowerUrl.contains('forcedownload=1'))) {
             return NavigationDecision.navigate;
-          },
-        ),
-      )
-      ..loadRequest(Uri.parse(widget.initialUrl));
+          }
+
+          bool isDownload = lowerUrl.contains('forcedownload=1') ||
+              (lowerUrl.contains('pluginfile.php') && 
+               !lowerUrl.contains('.html') && 
+               !lowerUrl.contains('.htm'));
+
+          if (isDownload) {
+            _triggerJsDownload(url);
+            return NavigationDecision.prevent;
+          }
+
+          return NavigationDecision.navigate;
+        },
+      ),
+    )
+    ..loadRequest(Uri.parse(widget.initialUrl));
+
+// Korrigierte Android Cookie-Steuerung für persistente Sessions
+    if (_controller.platform is AndroidWebViewController) {
+      AndroidWebViewCookieManager(
+        const PlatformWebViewCookieManagerCreationParams(),
+      ).setAcceptThirdPartyCookies(
+        _controller.platform as AndroidWebViewController,
+        true,
+      );
+    }
   }
 
   void _triggerJsDownload(String url) {
