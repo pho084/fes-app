@@ -2,11 +2,13 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/gestures.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'package:open_filex/open_filex.dart';
+import 'package:workmanager/workmanager.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -28,7 +30,240 @@ const Duration kOverlayHideDelay = Duration(milliseconds: 1000);
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await AuthService.instance.load();
+  await NotificationService.init();
+  if (Platform.isAndroid) {
+    // Läuft nur unter Android zuverlässig (siehe BackgroundSync-Hinweise unten).
+    try {
+      await Workmanager().initialize(callbackDispatcher);
+      if (AuthService.instance.credentials.value != null) {
+        await BackgroundSync.enable();
+      }
+    } catch (e) {
+      debugPrint('Workmanager konnte nicht gestartet werden: $e');
+    }
+  }
   runApp(const MyApp());
+}
+
+// ==========================================
+// 0c. HINTERGRUND-BENACHRICHTIGUNGEN (nur Android)
+// ==========================================
+
+const String _kBackgroundTaskUid = 'fes_app_unread_check';
+const String _kBackgroundTaskName = 'unread_check';
+const String _kLastNotifiedKey = 'moodle_last_notified_unread';
+
+/// Muss eine globale, mit @pragma('vm:entry-point') markierte Funktion sein:
+/// Workmanager startet sie in einem eigenen Hintergrund-Isolate.
+@pragma('vm:entry-point')
+void callbackDispatcher() {
+  Workmanager().executeTask((task, inputData) async {
+    debugPrint('[BackgroundSync] Job gestartet ($task)');
+    await BackgroundSync.performCheck(logPrefix: '[BackgroundSync]');
+    return true;
+  });
+}
+
+/// Ergebnis eines Prüflaufs, für die Diagnose-Anzeige in der App.
+class SyncCheckResult {
+  final bool hadCredentials;
+  final int? unreadCount;
+  final int? lastNotified;
+  final bool notified;
+  final String? error;
+  const SyncCheckResult({
+    required this.hadCredentials,
+    required this.unreadCount,
+    required this.lastNotified,
+    required this.notified,
+    required this.error,
+  });
+}
+
+/// An- und Abmelden der periodischen Hintergrundprüfung.
+class BackgroundSync {
+  BackgroundSync._();
+
+  /// Die eigentliche Prüf-Logik: exakt das, was der echte Hintergrundjob
+  /// alle 15 Minuten (bzw. seltener, je nach Android-Einstufung) ausführt.
+  /// Wird auch vom Diagnose-Knopf im Dashboard genutzt, damit man sie sofort
+  /// testen kann, ohne auf den Android-Scheduler zu warten.
+  static Future<SyncCheckResult> performCheck({String logPrefix = '[Sync]'}) async {
+    void log(String m) => debugPrint('$logPrefix $m');
+    try {
+      await NotificationService.init();
+      await AuthService.instance.load();
+      if (AuthService.instance.credentials.value == null) {
+        log('Keine gespeicherten Zugangsdaten gefunden.');
+        return const SyncCheckResult(
+          hadCredentials: false,
+          unreadCount: null,
+          lastNotified: null,
+          notified: false,
+          error: null,
+        );
+      }
+
+      // Statt nur die Anzahl ungelesener UNTERHALTUNGEN zu vergleichen (die
+      // bei einer weiteren Nachricht in derselben, schon ungelesenen
+      // Unterhaltung gleich bleibt), merken wir uns die höchste Nachrichten-ID
+      // einer fremden Nachricht. Jede neue Nachricht hat eine höhere ID, damit
+      // erkennen wir wirklich JEDE neue Nachricht, nicht nur die erste pro
+      // Unterhaltung.
+      final result = await MoodleApi.fetchConversations();
+      var unreadConversations = 0;
+      var maxForeignMessageId = 0;
+      for (final c in result.items) {
+        if (c.unread > 0) unreadConversations++;
+        final last = c.last;
+        if (last != null &&
+            last.fromUserId != result.myUserId &&
+            last.id > maxForeignMessageId) {
+          maxForeignMessageId = last.id;
+        }
+      }
+
+      const storage = FlutterSecureStorage();
+      final lastStr = await storage.read(key: _kLastNotifiedKey);
+      final lastSeenMessageId = int.tryParse(lastStr ?? '') ?? 0;
+      log(
+        'Neueste fremde Nachricht-ID: $maxForeignMessageId, zuletzt gemeldet: '
+        '$lastSeenMessageId, ungelesene Unterhaltungen: $unreadConversations',
+      );
+
+      var notified = false;
+      if (maxForeignMessageId > lastSeenMessageId) {
+        log('Zeige Benachrichtigung für $unreadConversations ungelesene Unterhaltung(en).');
+        await NotificationService.showNewMessages(
+          unreadConversations > 0 ? unreadConversations : 1,
+        );
+        notified = true;
+      } else {
+        log('Keine neue Nachricht seit dem letzten Mal.');
+      }
+      await storage.write(
+        key: _kLastNotifiedKey,
+        value: maxForeignMessageId.toString(),
+      );
+      log('Prüfung abgeschlossen.');
+      return SyncCheckResult(
+        hadCredentials: true,
+        unreadCount: unreadConversations,
+        lastNotified: lastSeenMessageId,
+        notified: notified,
+        error: null,
+      );
+    } catch (e, st) {
+      log('Fehler: $e\n$st');
+      return SyncCheckResult(
+        hadCredentials: true,
+        unreadCount: null,
+        lastNotified: null,
+        notified: false,
+        error: e.toString(),
+      );
+    }
+  }
+
+  /// Setzt den "zuletzt gemeldet"-Stand zurück, damit ein erneuter Test ohne
+  /// Vorbedingungen (Nachricht muss ungelesen UND höher als beim letzten
+  /// Test sein) sauber durchläuft.
+  static Future<void> resetLastNotified() async {
+    try {
+      await const FlutterSecureStorage().delete(key: _kLastNotifiedKey);
+    } catch (_) {}
+  }
+
+  static Future<void> enable() async {
+    if (!Platform.isAndroid) return;
+    try {
+      await Workmanager().registerPeriodicTask(
+        _kBackgroundTaskUid,
+        _kBackgroundTaskName,
+        // Android erzwingt ohnehin ein Minimum von 15 Minuten.
+        frequency: const Duration(minutes: 15),
+        constraints: Constraints(networkType: NetworkType.connected),
+        existingWorkPolicy: ExistingPeriodicWorkPolicy.keep,
+      );
+    } catch (e) {
+      debugPrint('[BackgroundSync] Konnte nicht aktiviert werden: $e');
+    }
+  }
+
+  static Future<void> disable() async {
+    if (!Platform.isAndroid) return;
+    try {
+      await Workmanager().cancelByUniqueName(_kBackgroundTaskUid);
+    } catch (e) {
+      debugPrint('[BackgroundSync] Konnte nicht deaktiviert werden: $e');
+    }
+    try {
+      await const FlutterSecureStorage().delete(key: _kLastNotifiedKey);
+    } catch (_) {}
+  }
+}
+
+/// Anzeige lokaler Benachrichtigungen (im Vorder- und im Hintergrund-Isolate
+/// gleichermaßen nutzbar).
+class NotificationService {
+  NotificationService._();
+  static final FlutterLocalNotificationsPlugin _plugin =
+      FlutterLocalNotificationsPlugin();
+  static bool _initialized = false;
+
+  static const AndroidNotificationChannel _channel = AndroidNotificationChannel(
+    'moodle_messages',
+    'Moodle-Nachrichten',
+    description: 'Benachrichtigung bei neuen ungelesenen Moodle-Nachrichten',
+    importance: Importance.defaultImportance,
+  );
+
+  static Future<void> init() async {
+    if (_initialized) return;
+    const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
+    await _plugin.initialize(
+      const InitializationSettings(android: androidInit),
+    );
+    await _plugin
+        .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin>()
+        ?.createNotificationChannel(_channel);
+    _initialized = true;
+  }
+
+  /// Fragt unter Android 13+ die Benachrichtigungs-Berechtigung ab. Vorher
+  /// erscheinen sonst keine Benachrichtigungen, ohne dass die App das merkt.
+  static Future<void> requestPermission() async {
+    try {
+      await _plugin
+          .resolvePlatformSpecificImplementation<
+              AndroidFlutterLocalNotificationsPlugin>()
+          ?.requestNotificationsPermission();
+    } catch (e) {
+      debugPrint('Benachrichtigungs-Berechtigung nicht abfragbar: $e');
+    }
+  }
+
+  static Future<void> showNewMessages(int count) async {
+    await init();
+    final text = count == 1
+        ? 'Du hast eine neue ungelesene Nachricht.'
+        : 'Du hast $count neue ungelesene Nachrichten.';
+    await _plugin.show(
+      1001,
+      'Moodle-Nachrichten',
+      text,
+      NotificationDetails(
+        android: AndroidNotificationDetails(
+          _channel.id,
+          _channel.name,
+          channelDescription: _channel.description,
+          importance: Importance.defaultImportance,
+          priority: Priority.defaultPriority,
+        ),
+      ),
+    );
+  }
 }
 
 // ==========================================
@@ -834,6 +1069,8 @@ class _LoginPageState extends State<LoginPage> {
       final tokens = await MoodleApi.requestTokens(username, password);
       // Danach wechselt der AuthGate automatisch zum Dashboard.
       await AuthService.instance.save(username, password, tokens);
+      await NotificationService.requestPermission();
+      await BackgroundSync.enable();
     } on MoodleApiException catch (e) {
       _fail(e.message);
     } catch (e) {
@@ -1022,6 +1259,96 @@ class _DashboardPageState extends State<DashboardPage>
     }
   }
 
+  Future<void> _testNotification() async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await NotificationService.requestPermission();
+      final count = await MoodleApi.fetchUnreadCount();
+      debugPrint('[BackgroundSync-Test] Ungelesene Nachrichten: $count');
+      if (count == null) {
+        messenger.showSnackBar(const SnackBar(
+          content: Text('Konnte ungelesene Nachrichten nicht abrufen (Verbindungsfehler).'),
+        ));
+        return;
+      }
+      // Erzwingt die Anzeige, unabhängig vom zuletzt gemeldeten Stand,
+      // rein zum Testen, ob Berechtigung/Kanal funktionieren.
+      await NotificationService.showNewMessages(count == 0 ? 1 : count);
+      messenger.showSnackBar(SnackBar(
+        content: Text(
+          'Testbenachrichtigung ausgelöst. Ungelesene laut Moodle: $count',
+        ),
+      ));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Fehler: $e')));
+    }
+  }
+
+  /// Führt exakt die Logik des echten Hintergrundjobs sofort im Vordergrund
+  /// aus und zeigt das Ergebnis in einem Dialog. Kein Warten auf den
+  /// Android-Scheduler, kein ADB nötig.
+  Future<void> _runDiagnostics() async {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => const AlertDialog(
+        content: Row(
+          children: [
+            SizedBox(
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+            SizedBox(width: 16),
+            Text('Prüfung läuft …'),
+          ],
+        ),
+      ),
+    );
+    final result = await BackgroundSync.performCheck(logPrefix: '[Sync-Diagnose]');
+    if (!mounted) return;
+    Navigator.of(context, rootNavigator: true).pop(); // Lade-Dialog schließen
+
+    final lines = <String>[
+      'Zugangsdaten gefunden: ${result.hadCredentials ? "ja" : "nein"}',
+      if (result.error != null) 'Fehler: ${result.error}',
+      if (result.unreadCount != null) 'Ungelesene Unterhaltungen: ${result.unreadCount}',
+      if (result.lastNotified != null) 'Zuletzt gemeldete Nachrichten-ID: ${result.lastNotified}',
+      'Benachrichtigung ausgelöst: ${result.notified ? "JA" : "nein"}',
+    ];
+
+    if (!mounted) return;
+    await showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Diagnose-Ergebnis'),
+        content: Text(lines.join('\n')),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              await BackgroundSync.resetLastNotified();
+              if (ctx.mounted) {
+                Navigator.pop(ctx);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text(
+                      'Zurückgesetzt. Nächste Prüfung meldet wieder, auch bei gleicher Zahl.',
+                    ),
+                  ),
+                );
+              }
+            },
+            child: const Text('Zurücksetzen'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Ok'),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _logout() async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -1047,6 +1374,7 @@ class _DashboardPageState extends State<DashboardPage>
     // Moodle-Session im WebView beenden und Zugangsdaten samt Token löschen.
     // Der AuthGate zeigt danach automatisch wieder die Anmeldung.
     await WebViewCookieManager().clearCookies();
+    await BackgroundSync.disable();
     await AuthService.instance.clear();
   }
 
@@ -1063,8 +1391,18 @@ class _DashboardPageState extends State<DashboardPage>
           PopupMenuButton<String>(
             onSelected: (value) {
               if (value == 'logout') _logout();
+              if (value == 'testNotify') _testNotification();
+              if (value == 'diagnose') _runDiagnostics();
             },
             itemBuilder: (context) => const [
+              PopupMenuItem(
+                value: 'testNotify',
+                child: Text('Benachrichtigung testen'),
+              ),
+              PopupMenuItem(
+                value: 'diagnose',
+                child: Text('Hintergrundprüfung jetzt ausführen'),
+              ),
               PopupMenuItem(value: 'logout', child: Text('Abmelden')),
             ],
           ),

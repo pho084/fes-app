@@ -1,4 +1,4 @@
-package com.example.fes_schul_app
+package de.fespf.fesapp
 
 import io.flutter.embedding.android.FlutterActivity
 
