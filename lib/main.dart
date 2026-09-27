@@ -960,6 +960,163 @@ class MoodleApi {
       return file;
     });
   }
+
+  // ---------- Kurse ----------
+
+  static Future<List<MoodleCourse>> fetchCourses() {
+    return _withTokens<List<MoodleCourse>>((t) async {
+      final json = await _call(
+        t.token,
+        'core_enrol_get_users_courses',
+        params: {'userid': t.userId.toString()},
+      );
+      final courses = <MoodleCourse>[];
+      if (json is List) {
+        for (final c in json) {
+          if (c is! Map) continue;
+          final id = c['id'];
+          final name = c['fullname'];
+          if (id is! int || name is! String) continue;
+          courses.add(
+            MoodleCourse(
+              id: id,
+              fullName: name,
+              shortName: c['shortname'] is String ? c['shortname'] as String : '',
+              summary: c['summary'] is String
+                  ? htmlToText(c['summary'] as String)
+                  : '',
+              progress: c['progress'] is num ? (c['progress'] as num).toInt() : null,
+              startDate: c['startdate'] is int ? c['startdate'] as int : null,
+            ),
+          );
+        }
+      }
+      // Zuletzt besuchte/aktivste Kurse zuerst (Moodle liefert sie meist schon so)
+      return courses;
+    });
+  }
+
+  static Future<List<CourseSection>> fetchCourseContents(int courseId) {
+    return _withTokens<List<CourseSection>>((t) async {
+      final json = await _call(
+        t.token,
+        'core_course_get_contents',
+        params: {'courseid': courseId.toString()},
+      );
+      final sections = <CourseSection>[];
+      if (json is List) {
+        for (final s in json) {
+          if (s is! Map) continue;
+          final modules = <CourseModule>[];
+          final rawModules = s['modules'];
+          if (rawModules is List) {
+            for (final m in rawModules) {
+              if (m is! Map) continue;
+              final name = m['name'];
+              if (name is! String) continue;
+              // "stealth" / versteckte Aktivitäten überspringen
+              if (m['uservisible'] == false) continue;
+              modules.add(
+                CourseModule(
+                  id: m['id'] is int ? m['id'] as int : 0,
+                  name: name,
+                  modType: m['modname'] is String ? m['modname'] as String : '',
+                  url: m['url'] is String ? m['url'] as String : null,
+                  description: m['description'] is String
+                      ? htmlToText(m['description'] as String)
+                      : '',
+                ),
+              );
+            }
+          }
+          sections.add(
+            CourseSection(
+              name: s['name'] is String ? s['name'] as String : '',
+              summary: s['summary'] is String
+                  ? htmlToText(s['summary'] as String)
+                  : '',
+              visible: s['visible'] != false,
+              modules: modules,
+            ),
+          );
+        }
+      }
+      return sections;
+    });
+  }
+
+  // ---------- Systembenachrichtigungen (Glocke, nicht Chat) ----------
+
+  static SystemNotification? _parseSystemNotification(dynamic n) {
+    if (n is! Map) return null;
+    final id = n['id'];
+    if (id is! int) return null;
+    final subject = n['subject'];
+    final html = n['fullmessagehtml'] ?? n['fullmessage'] ?? n['smallmessage'];
+    return SystemNotification(
+      id: id,
+      subject: subject is String && subject.isNotEmpty ? subject : 'Mitteilung',
+      message: htmlToText(html is String ? html : ''),
+      url: n['contexturl'] is String && (n['contexturl'] as String).isNotEmpty
+          ? n['contexturl'] as String
+          : null,
+      read: n['read'] == true,
+      time: n['timecreated'] is int ? n['timecreated'] as int : 0,
+    );
+  }
+
+  static Future<List<SystemNotification>> fetchSystemNotifications() {
+    return _withTokens<List<SystemNotification>>((t) async {
+      final json = await _call(
+        t.token,
+        'message_popup_get_popup_notifications',
+        params: {
+          'useridto': t.userId.toString(),
+          'newestfirst': '1',
+          'limit': '50',
+        },
+      );
+      final items = <SystemNotification>[];
+      final raw = json is Map ? json['notifications'] : null;
+      if (raw is List) {
+        for (final n in raw) {
+          final parsed = _parseSystemNotification(n);
+          if (parsed != null) items.add(parsed);
+        }
+      }
+      return items;
+    });
+  }
+
+  static Future<int?> fetchUnreadNotificationCount() async {
+    try {
+      return await _withTokens<int?>((t) async {
+        final json = await _call(
+          t.token,
+          'message_popup_get_unread_popup_notification_count',
+          params: {'useridto': t.userId.toString()},
+        );
+        return json is num ? json.toInt() : null;
+      });
+    } catch (e) {
+      debugPrint('Ungelesene Systembenachrichtigungen nicht abrufbar: $e');
+      return null;
+    }
+  }
+
+  static Future<void> markNotificationRead(int notificationId) async {
+    try {
+      await _withTokens<void>((t) async {
+        await _call(
+          t.token,
+          'core_message_mark_notification_read',
+          params: {'notificationid': notificationId.toString()},
+        );
+      });
+    } catch (e) {
+      debugPrint('Als gelesen markieren (Systembenachrichtigung) fehlgeschlagen: $e');
+    }
+  }
 }
 
 /// Zeigt die Anmeldung, solange keine Zugangsdaten gespeichert sind,
@@ -972,7 +1129,7 @@ class AuthGate extends StatelessWidget {
     return ValueListenableBuilder<Credentials?>(
       valueListenable: AuthService.instance.credentials,
       builder: (context, creds, _) =>
-          creds == null ? const LoginPage() : const DashboardPage(),
+          creds == null ? const LoginPage() : const MainShell(),
     );
   }
 }
@@ -1213,28 +1370,54 @@ class _LoginPageState extends State<LoginPage> {
 // ==========================================
 // 1. DASHBOARD GRID (GRÖSSERES LOGO)
 // ==========================================
-class DashboardPage extends StatefulWidget {
-  const DashboardPage({super.key});
+// ==========================================
+// 0d. HAUPT-NAVIGATION (Bottom-Nav wie in der offiziellen Moodle-App)
+// ==========================================
+class MainShell extends StatefulWidget {
+  const MainShell({super.key});
 
   @override
-  State<DashboardPage> createState() => _DashboardPageState();
+  State<MainShell> createState() => _MainShellState();
 }
 
-class _DashboardPageState extends State<DashboardPage>
-    with WidgetsBindingObserver {
-  /// Anzahl Konversationen mit ungelesenen Moodle-Nachrichten
+/// Reihenfolge der sichtbaren Bottom-Nav-Einträge. "Vertretungsplan" ist ein
+/// Aktions-Eintrag (öffnet direkt eine Seite), kein eigener Tab-Inhalt.
+enum _NavItem { home, courses, messages, notifications, vertretungsplan, more }
+
+class _MainShellState extends State<MainShell> with WidgetsBindingObserver {
+  /// Index innerhalb der TAB-INHALTE (ohne den Vertretungsplan-Aktionspunkt).
+  int _tabIndex = 0;
+
   int? _unreadMessages;
+  int? _unreadNotifications;
   Timer? _refreshTimer;
+
+  static const _tabItems = [
+    _NavItem.home,
+    _NavItem.courses,
+    _NavItem.messages,
+    _NavItem.notifications,
+    _NavItem.more,
+  ];
+  // Reihenfolge, wie sie in der Bottom-Nav angezeigt wird (mit Vertretungsplan).
+  static const _navOrder = [
+    _NavItem.home,
+    _NavItem.courses,
+    _NavItem.messages,
+    _NavItem.notifications,
+    _NavItem.vertretungsplan,
+    _NavItem.more,
+  ];
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _refreshUnread();
+    _refreshBadges();
     // Solange die App offen ist, alle 3 Minuten aktualisieren
     _refreshTimer = Timer.periodic(
       const Duration(minutes: 3),
-      (_) => _refreshUnread(),
+      (_) => _refreshBadges(),
     );
   }
 
@@ -1247,18 +1430,157 @@ class _DashboardPageState extends State<DashboardPage>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) _refreshUnread();
+    if (state == AppLifecycleState.resumed) _refreshBadges();
   }
 
-  Future<void> _refreshUnread() async {
-    final count = await MoodleApi.fetchUnreadCount();
+  Future<void> _refreshBadges() async {
+    final results = await Future.wait([
+      MoodleApi.fetchUnreadCount(),
+      MoodleApi.fetchUnreadNotificationCount(),
+    ]);
     if (!mounted) return;
-    // Bei einem Fehler (null) bleibt der zuletzt bekannte Wert stehen
-    if (count != null && count != _unreadMessages) {
-      setState(() => _unreadMessages = count);
-    }
+    final messages = results[0];
+    final notifications = results[1];
+    setState(() {
+      if (messages != null) _unreadMessages = messages;
+      if (notifications != null) _unreadNotifications = notifications;
+    });
   }
 
+  void _openVertretungsplan() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => const WebViewPage(
+          initialUrl:
+              'https://moodle.fes-pforzheim.de/moodle/pluginfile.php/290597/mod_folder/content/0/stundenplan/subst_001.htm',
+          title: 'Vertretung',
+          dayUrls: [
+            'https://moodle.fes-pforzheim.de/moodle/pluginfile.php/290597/mod_folder/content/0/stundenplan/subst_001.htm',
+            'https://moodle.fes-pforzheim.de/moodle/pluginfile.php/290597/mod_folder/content/0/stundenplan/subst_002.htm',
+          ],
+          dayLabels: ['Heute', 'Morgen'],
+          bustCache: true,
+        ),
+      ),
+    ).then((_) => _refreshBadges());
+  }
+
+  void _onNavTap(int navIndex) {
+    final item = _navOrder[navIndex];
+    if (item == _NavItem.vertretungsplan) {
+      _openVertretungsplan();
+      return;
+    }
+    final tabIndex = _tabItems.indexOf(item);
+    setState(() => _tabIndex = tabIndex);
+    _refreshBadges();
+  }
+
+  BottomNavigationBarItem _navBarItem({
+    required IconData icon,
+    required String label,
+    int? badge,
+  }) {
+    final iconWidget = Icon(icon);
+    return BottomNavigationBarItem(
+      icon: (badge != null && badge > 0)
+          ? Badge(label: Text(badge > 99 ? '99+' : '$badge'), child: iconWidget)
+          : iconWidget,
+      label: label,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // currentIndex der BottomNavigationBar bezieht sich auf _navOrder, nicht
+    // auf _tabItems (der Vertretungsplan-Eintrag liegt dazwischen).
+    final currentNavIndex = _navOrder.indexOf(_tabItems[_tabIndex]);
+
+    return Scaffold(
+      body: IndexedStack(
+        index: _tabIndex,
+        children: [
+          HomeTab(
+            unreadMessages: _unreadMessages,
+            unreadNotifications: _unreadNotifications,
+            onOpenVertretungsplan: _openVertretungsplan,
+            onSelectTab: (item) =>
+                setState(() => _tabIndex = _tabItems.indexOf(item)),
+          ),
+          const CoursesPage(),
+          const MessagesPage(),
+          const SystemNotificationsPage(),
+          const MoreTab(),
+        ],
+      ),
+      bottomNavigationBar: BottomNavigationBar(
+        type: BottomNavigationBarType.fixed,
+        selectedFontSize: 11,
+        unselectedFontSize: 11,
+        currentIndex: currentNavIndex,
+        onTap: _onNavTap,
+        items: [
+          _navBarItem(icon: Icons.home_rounded, label: 'Start'),
+          _navBarItem(icon: Icons.school_rounded, label: 'Kurse'),
+          _navBarItem(
+            icon: Icons.mail_rounded,
+            label: 'Nachrichten',
+            badge: _unreadMessages,
+          ),
+          _navBarItem(
+            icon: Icons.notifications_rounded,
+            label: 'Meldungen',
+            badge: _unreadNotifications,
+          ),
+          _navBarItem(
+            icon: Icons.calendar_month_rounded,
+            label: 'Vertretung',
+          ),
+          _navBarItem(icon: Icons.more_horiz_rounded, label: 'Mehr'),
+        ],
+      ),
+    );
+  }
+}
+
+// ---------- Startseite ----------
+class HomeTab extends StatelessWidget {
+  final int? unreadMessages;
+  final int? unreadNotifications;
+  final VoidCallback onOpenVertretungsplan;
+  final ValueChanged<_NavItem> onSelectTab;
+  const HomeTab({
+    super.key,
+    required this.unreadMessages,
+    required this.unreadNotifications,
+    required this.onOpenVertretungsplan,
+    required this.onSelectTab,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    // Zeigt die echte Moodle-Startseite (samt eigener Kopfzeile, News,
+    // Kalender-Widget etc.) direkt eingebettet, statt eigener Kacheln, die
+    // ohnehin schon über die Bottom-Navigation erreichbar sind.
+    return const WebViewPage(
+      initialUrl: 'https://$kMoodleHost/moodle/',
+      title: 'Startseite',
+      embedded: true,
+      hideMoodleHeaderIcons: true,
+    );
+  }
+}
+
+// ---------- "Mehr"-Menü ----------
+class MoreTab extends StatefulWidget {
+  const MoreTab({super.key});
+
+  @override
+  State<MoreTab> createState() => _MoreTabState();
+}
+
+class _MoreTabState extends State<MoreTab> {
   Future<void> _testNotification() async {
     final messenger = ScaffoldMessenger.of(context);
     try {
@@ -1271,22 +1593,15 @@ class _DashboardPageState extends State<DashboardPage>
         ));
         return;
       }
-      // Erzwingt die Anzeige, unabhängig vom zuletzt gemeldeten Stand,
-      // rein zum Testen, ob Berechtigung/Kanal funktionieren.
       await NotificationService.showNewMessages(count == 0 ? 1 : count);
       messenger.showSnackBar(SnackBar(
-        content: Text(
-          'Testbenachrichtigung ausgelöst. Ungelesene laut Moodle: $count',
-        ),
+        content: Text('Testbenachrichtigung ausgelöst. Ungelesene laut Moodle: $count'),
       ));
     } catch (e) {
       messenger.showSnackBar(SnackBar(content: Text('Fehler: $e')));
     }
   }
 
-  /// Führt exakt die Logik des echten Hintergrundjobs sofort im Vordergrund
-  /// aus und zeigt das Ergebnis in einem Dialog. Kein Warten auf den
-  /// Android-Scheduler, kein ADB nötig.
   Future<void> _runDiagnostics() async {
     showDialog(
       context: context,
@@ -1294,11 +1609,7 @@ class _DashboardPageState extends State<DashboardPage>
       builder: (ctx) => const AlertDialog(
         content: Row(
           children: [
-            SizedBox(
-              width: 20,
-              height: 20,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            ),
+            SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)),
             SizedBox(width: 16),
             Text('Prüfung läuft …'),
           ],
@@ -1307,7 +1618,7 @@ class _DashboardPageState extends State<DashboardPage>
     );
     final result = await BackgroundSync.performCheck(logPrefix: '[Sync-Diagnose]');
     if (!mounted) return;
-    Navigator.of(context, rootNavigator: true).pop(); // Lade-Dialog schließen
+    Navigator.of(context, rootNavigator: true).pop();
 
     final lines = <String>[
       'Zugangsdaten gefunden: ${result.hadCredentials ? "ja" : "nein"}',
@@ -1331,19 +1642,14 @@ class _DashboardPageState extends State<DashboardPage>
                 Navigator.pop(ctx);
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(
-                    content: Text(
-                      'Zurückgesetzt. Nächste Prüfung meldet wieder, auch bei gleicher Zahl.',
-                    ),
+                    content: Text('Zurückgesetzt. Nächste Prüfung meldet wieder, auch bei gleicher Zahl.'),
                   ),
                 );
               }
             },
             child: const Text('Zurücksetzen'),
           ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Ok'),
-          ),
+          FilledButton(onPressed: () => Navigator.pop(ctx), child: const Text('Ok')),
         ],
       ),
     );
@@ -1354,206 +1660,65 @@ class _DashboardPageState extends State<DashboardPage>
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Abmelden?'),
-        content: const Text(
-          'Deine gespeicherten Zugangsdaten werden von diesem Gerät gelöscht.',
-        ),
+        content: const Text('Deine gespeicherten Zugangsdaten werden von diesem Gerät gelöscht.'),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Abbrechen'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Abmelden'),
-          ),
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Abbrechen')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Abmelden')),
         ],
       ),
     );
     if (confirmed != true) return;
-
-    // Moodle-Session im WebView beenden und Zugangsdaten samt Token löschen.
-    // Der AuthGate zeigt danach automatisch wieder die Anmeldung.
     await WebViewCookieManager().clearCookies();
     await BackgroundSync.disable();
     await AuthService.instance.clear();
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text(
-          'FES-APP',
-          style: TextStyle(fontWeight: FontWeight.bold, letterSpacing: 1.1),
-        ),
-        centerTitle: true,
-        actions: [
-          PopupMenuButton<String>(
-            onSelected: (value) {
-              if (value == 'logout') _logout();
-              if (value == 'testNotify') _testNotification();
-              if (value == 'diagnose') _runDiagnostics();
-            },
-            itemBuilder: (context) => const [
-              PopupMenuItem(
-                value: 'testNotify',
-                child: Text('Benachrichtigung testen'),
-              ),
-              PopupMenuItem(
-                value: 'diagnose',
-                child: Text('Hintergrundprüfung jetzt ausführen'),
-              ),
-              PopupMenuItem(value: 'logout', child: Text('Abmelden')),
-            ],
-          ),
-        ],
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(20.0),
-        child: Column(
-          children: [
-            // Logo-Container mit mehr Höhe
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(vertical: 5, horizontal: 20),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(16),
-                boxShadow: const [
-                  BoxShadow(
-                    color: Colors.black12,
-                    blurRadius: 6,
-                    offset: Offset(0, 3),
-                  ),
-                ],
-              ),
-              child: Image.asset(
-                'assets/images/fes_logo.png',
-                height: 200, // logo höhe
-                fit: BoxFit.contain,
-                errorBuilder: (context, error, stackTrace) => const Icon(
-                  Icons.school,
-                  size: 60,
-                  color: Color(0xFF1A5276),
-                ),
-              ),
-            ),
-            const SizedBox(height: 16),
-            const Text(
-              'Wähle einen Bereich aus:',
-              style: TextStyle(
-                fontSize: 14,
-                color: Colors.grey,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-            const SizedBox(height: 16),
-            Expanded(
-              child: GridView.count(
-                crossAxisCount: 2,
-                crossAxisSpacing: 16,
-                mainAxisSpacing: 16,
-                children: [
-                  _buildTile(
-                    context,
-                    title: 'Moodle',
-                    icon: Icons.school_rounded,
-                    color: const Color(0xFFE67E22),
-                    url: 'https://moodle.fes-pforzheim.de/moodle/',
-                  ),
-                  _buildTile(
-                    context,
-                    title: 'Vertretungsplan',
-                    icon: Icons.calendar_month_rounded,
-                    color: const Color(0xFF27AE60),
-                    url: 'https://moodle.fes-pforzheim.de/moodle/course/view.php?id=1517',
-                  ),
-                  _buildTile(
-                    context,
-                    title: 'Krankmeldung',
-                    icon: Icons.assignment_turned_in_rounded,
-                    color: const Color(0xFFC0392B),
-                    url: 'https://www.fes-pforzheim.de/entschuldigungsformular',
-                  ),
-                  _buildTile(
-                    context,
-                    title: 'Nachrichten',
-                    icon: Icons.mail_rounded,
-                    color: const Color(0xFF2980B9),
-                    url: kMessagesUrl,
-                    badge: _unreadMessages ?? 0,
-                    // Native Ansicht statt der (auf dem Handy schlecht lesbaren)
-                    // Moodle-Seite
-                    pageBuilder: (context) => const MessagesPage(),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
+  void _open(String url, String title) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (context) => WebViewPage(initialUrl: url, title: title)),
     );
   }
 
-  Widget _buildTile(
-    BuildContext context, {
-    required String title,
-    required IconData icon,
-    required Color color,
-    required String url,
-    int badge = 0,
-    WidgetBuilder? pageBuilder,
-  }) {
-    final iconCircle = Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: color.withOpacity(0.1),
-        shape: BoxShape.circle,
-      ),
-      child: Icon(icon, size: 36, color: color),
-    );
-
-    return Card(
-      elevation: 2,
-      shadowColor: Colors.black12,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(16),
-        onTap: () async {
-          await Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: pageBuilder ??
-                  (context) => WebViewPage(initialUrl: url, title: title),
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: fesAppBarTitle('Mehr')),
+      body: ListView(
+        children: [
+          ListTile(
+            leading: const Icon(Icons.assignment_turned_in_rounded, color: Color(0xFFC0392B)),
+            title: const Text('Krankmeldung'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => _open(
+              'https://www.fes-pforzheim.de/entschuldigungsformular',
+              'Krankmeldung',
             ),
-          );
-          // Nach der Rückkehr ist die Nachrichten-Zahl evtl. nicht mehr aktuell
-          _refreshUnread();
-        },
-        child: Padding(
-          padding: const EdgeInsets.all(12.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              badge > 0
-                  ? Badge(
-                      label: Text(badge > 99 ? '99+' : '$badge'),
-                      child: iconCircle,
-                    )
-                  : iconCircle,
-              const SizedBox(height: 12),
-              Text(
-                title,
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.bold,
-                  color: Color(0xFF34495E),
-                ),
-              ),
-            ],
           ),
-        ),
+          ListTile(
+            leading: const Icon(Icons.language_rounded, color: Color(0xFF2980B9)),
+            title: const Text('Homepage'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => _open('https://fes-pforzheim.de', 'Homepage'),
+          ),
+          const Divider(),
+          ListTile(
+            leading: const Icon(Icons.notifications_active_outlined),
+            title: const Text('Benachrichtigung testen'),
+            onTap: _testNotification,
+          ),
+          ListTile(
+            leading: const Icon(Icons.bug_report_outlined),
+            title: const Text('Hintergrundprüfung jetzt ausführen'),
+            onTap: _runDiagnostics,
+          ),
+          const Divider(),
+          ListTile(
+            leading: const Icon(Icons.logout, color: Colors.redAccent),
+            title: const Text('Abmelden'),
+            onTap: _logout,
+          ),
+        ],
       ),
     );
   }
@@ -1635,6 +1800,23 @@ class NewChatTarget {
   final Conversation conversation;
   final int userId;
   const NewChatTarget({required this.conversation, required this.userId});
+}
+
+class SystemNotification {
+  final int id;
+  final String subject;
+  final String message;
+  final String? url;
+  final bool read;
+  final int time;
+  const SystemNotification({
+    required this.id,
+    required this.subject,
+    required this.message,
+    required this.url,
+    required this.read,
+    required this.time,
+  });
 }
 
 /// Wandelt den HTML-Text einer Moodle-Nachricht in einfachen Text um.
@@ -1733,14 +1915,40 @@ Future<bool> confirmDialog(
   return result == true;
 }
 
+/// Kopfzeilen-Titel mit kleinem Schullogo, für einheitliche Markenbildung
+/// auf allen selbst gestalteten (nicht-WebView-)Seiten.
+Widget fesAppBarTitle(String text) {
+  return Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      ClipRRect(
+        borderRadius: BorderRadius.circular(4),
+        child: Image.asset(
+          'assets/images/fes_logo.png',
+          height: 22,
+          width: 22,
+          fit: BoxFit.contain,
+          errorBuilder: (context, error, stackTrace) =>
+              const Icon(Icons.school, size: 20),
+        ),
+      ),
+      const SizedBox(width: 8),
+      Flexible(child: Text(text, overflow: TextOverflow.ellipsis)),
+    ],
+  );
+}
+
 /// Öffnet die Moodle-Nachrichtenseite im WebView (für Funktionen, die die
 /// native Ansicht nicht kann).
 void openMessagesInMoodle(BuildContext context) {
   Navigator.push(
     context,
     MaterialPageRoute(
-      builder: (context) =>
-          const WebViewPage(initialUrl: kMessagesUrl, title: 'Nachrichten'),
+      builder: (context) => const WebViewPage(
+        initialUrl: kMessagesUrl,
+        title: 'Nachrichten',
+        hideMoodleHeaderIcons: true,
+      ),
     ),
   );
 }
@@ -1789,7 +1997,11 @@ Future<void> handleLinkTap(BuildContext context, String rawUrl) async {
       Navigator.push(
         context,
         MaterialPageRoute(
-          builder: (context) => WebViewPage(initialUrl: url, title: 'Moodle'),
+          builder: (context) => WebViewPage(
+            initialUrl: url,
+            title: 'Moodle',
+            hideMoodleHeaderIcons: true,
+          ),
         ),
       );
     }
@@ -2196,7 +2408,7 @@ class _MessagesPageState extends State<MessagesPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Nachrichten'),
+        title: fesAppBarTitle('Nachrichten'),
         actions: [
           IconButton(
             icon: _requestCount > 0
@@ -2990,12 +3202,477 @@ class _ContactRequestsPageState extends State<ContactRequestsPage> {
 }
 
 // ==========================================
+// 1d. SYSTEMBENACHRICHTIGUNGEN (Glocke)
+// ==========================================
+class SystemNotificationsPage extends StatefulWidget {
+  const SystemNotificationsPage({super.key});
+
+  @override
+  State<SystemNotificationsPage> createState() => _SystemNotificationsPageState();
+}
+
+class _SystemNotificationsPageState extends State<SystemNotificationsPage> {
+  List<SystemNotification>? _items;
+  String? _error;
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final items = await MoodleApi.fetchSystemNotifications();
+      if (!mounted) return;
+      setState(() {
+        _items = items;
+        _error = null;
+        _loading = false;
+      });
+    } catch (e) {
+      debugPrint('Systembenachrichtigungen nicht ladbar: $e');
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = describeApiError(e);
+      });
+    }
+  }
+
+  Future<void> _open(SystemNotification n) async {
+    if (!n.read) {
+      MoodleApi.markNotificationRead(n.id);
+      setState(() {
+        _items = _items
+            ?.map((x) => x.id == n.id
+                ? SystemNotification(
+                    id: x.id,
+                    subject: x.subject,
+                    message: x.message,
+                    url: x.url,
+                    read: true,
+                    time: x.time,
+                  )
+                : x)
+            .toList();
+      });
+    }
+    if (n.url != null) {
+      await handleLinkTap(context, n.url!);
+    } else {
+      await showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: Text(n.subject),
+          content: SingleChildScrollView(child: Text(n.message)),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Ok')),
+          ],
+        ),
+      );
+    }
+  }
+
+  Widget _tile(SystemNotification n) {
+    return ListTile(
+      leading: Icon(
+        n.read ? Icons.notifications_none : Icons.notifications_active,
+        color: n.read ? Colors.grey : Theme.of(context).colorScheme.primary,
+      ),
+      title: Text(
+        n.subject,
+        style: TextStyle(fontWeight: n.read ? FontWeight.normal : FontWeight.bold),
+      ),
+      subtitle: Text(
+        n.message,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+      ),
+      trailing: Text(
+        n.time == 0 ? '' : formatListTime(n.time),
+        style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+      ),
+      onTap: () => _open(n),
+    );
+  }
+
+  Widget _buildBody() {
+    final items = _items;
+    if (items == null) {
+      if (_loading) return const Center(child: CircularProgressIndicator());
+      return _ErrorView(
+        message: _error ?? 'Unbekannter Fehler.',
+        onRetry: () {
+          setState(() {
+            _loading = true;
+            _error = null;
+          });
+          _load();
+        },
+        onOpenMoodle: () => Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => const WebViewPage(
+              initialUrl:
+                  'https://$kMoodleHost/moodle/message/output/popup/notifications.php',
+              title: 'Benachrichtigungen',
+              hideMoodleHeaderIcons: true,
+            ),
+          ),
+        ),
+      );
+    }
+    if (items.isEmpty) {
+      return const Center(child: Text('Keine Benachrichtigungen vorhanden.'));
+    }
+    return RefreshIndicator(
+      onRefresh: _load,
+      child: ListView.separated(
+        physics: const AlwaysScrollableScrollPhysics(),
+        itemCount: items.length,
+        separatorBuilder: (context, index) => const Divider(height: 1),
+        itemBuilder: (context, index) => _tile(items[index]),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: fesAppBarTitle('Benachrichtigungen')),
+      body: _buildBody(),
+    );
+  }
+}
+
+// ==========================================
+// 1c. KURSE (native Ansicht über die Moodle-Web-Services)
+// ==========================================
+class MoodleCourse {
+  final int id;
+  final String fullName;
+  final String shortName;
+  final String summary;
+  final int? progress; // 0-100, null wenn Moodle keinen Fortschritt liefert
+  final int? startDate;
+  const MoodleCourse({
+    required this.id,
+    required this.fullName,
+    required this.shortName,
+    required this.summary,
+    required this.progress,
+    required this.startDate,
+  });
+}
+
+class CourseModule {
+  final int id;
+  final String name;
+
+  /// Moodle-Aktivitätstyp, z. B. "resource", "assign", "forum", "url", "quiz"
+  final String modType;
+  final String? url;
+  final String description;
+  const CourseModule({
+    required this.id,
+    required this.name,
+    required this.modType,
+    required this.url,
+    required this.description,
+  });
+}
+
+class CourseSection {
+  final String name;
+  final String summary;
+  final bool visible;
+  final List<CourseModule> modules;
+  const CourseSection({
+    required this.name,
+    required this.summary,
+    required this.visible,
+    required this.modules,
+  });
+}
+
+/// Icon je Moodle-Aktivitätstyp. Unbekannte Typen bekommen ein neutrales
+/// Dokument-Symbol, öffnen aber genauso im WebView.
+IconData iconForModType(String modType) {
+  switch (modType) {
+    case 'resource':
+      return Icons.description_outlined;
+    case 'folder':
+      return Icons.folder_outlined;
+    case 'url':
+      return Icons.link;
+    case 'assign':
+      return Icons.assignment_outlined;
+    case 'quiz':
+      return Icons.quiz_outlined;
+    case 'forum':
+      return Icons.forum_outlined;
+    case 'page':
+      return Icons.article_outlined;
+    case 'book':
+      return Icons.menu_book_outlined;
+    case 'label':
+      return Icons.label_outline;
+    case 'h5pactivity':
+      return Icons.extension_outlined;
+    case 'lesson':
+      return Icons.school_outlined;
+    case 'choice':
+      return Icons.how_to_vote_outlined;
+    case 'feedback':
+      return Icons.rate_review_outlined;
+    default:
+      return Icons.insert_drive_file_outlined;
+  }
+}
+
+// ---------- Kursliste ----------
+class CoursesPage extends StatefulWidget {
+  const CoursesPage({super.key});
+
+  @override
+  State<CoursesPage> createState() => _CoursesPageState();
+}
+
+class _CoursesPageState extends State<CoursesPage> {
+  List<MoodleCourse>? _courses;
+  String? _error;
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final courses = await MoodleApi.fetchCourses();
+      if (!mounted) return;
+      setState(() {
+        _courses = courses;
+        _error = null;
+        _loading = false;
+      });
+    } catch (e) {
+      debugPrint('Kurse nicht ladbar: $e');
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = describeApiError(e);
+      });
+    }
+  }
+
+  void _openMoodleCourses() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => const WebViewPage(
+          initialUrl: 'https://$kMoodleHost/moodle/my/courses.php',
+          title: 'Meine Kurse',
+          hideMoodleHeaderIcons: true,
+        ),
+      ),
+    );
+  }
+
+  /// Feste, angenehme Farbpalette, angelehnt an die zufälligen Farbmuster,
+  /// die Moodle selbst pro Kurs generiert. Deterministisch nach Kurs-ID, damit
+  /// ein Kurs immer dieselbe Farbe behält.
+  static const List<Color> _palette = [
+    Color(0xFF1ABC9C),
+    Color(0xFFE67E22),
+    Color(0xFF9B59B6),
+    Color(0xFF3498DB),
+    Color(0xFFE74C3C),
+    Color(0xFF16A085),
+    Color(0xFFF39C12),
+    Color(0xFF2980B9),
+  ];
+
+  Color _colorFor(MoodleCourse c) => _palette[c.id % _palette.length];
+
+  String _initialsFor(MoodleCourse c) {
+    final source = c.shortName.isNotEmpty ? c.shortName : c.fullName;
+    final letters = source.replaceAll(RegExp(r'[^A-Za-z0-9]'), '');
+    if (letters.isEmpty) return '?';
+    return letters.length == 1
+        ? letters.toUpperCase()
+        : letters.substring(0, 2).toUpperCase();
+  }
+
+  Widget _tile(MoodleCourse c) {
+    final color = _colorFor(c);
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: () => Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (context) => WebViewPage(
+              initialUrl: 'https://$kMoodleHost/moodle/course/view.php?id=${c.id}',
+              title: c.shortName.isEmpty ? c.fullName : c.shortName,
+              hideMoodleHeaderIcons: true,
+            ),
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 48,
+                height: 48,
+                decoration: BoxDecoration(
+                  color: color,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                alignment: Alignment.center,
+                child: Text(
+                  _initialsFor(c),
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      c.fullName,
+                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                    ),
+                    if (c.summary.isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        c.summary,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(color: Colors.grey.shade700, fontSize: 13),
+                      ),
+                    ],
+                    if (c.progress != null) ...[
+                      const SizedBox(height: 10),
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(4),
+                        child: LinearProgressIndicator(
+                          value: c.progress! / 100,
+                          minHeight: 6,
+                          color: color,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '${c.progress}% abgeschlossen',
+                        style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBody() {
+    final courses = _courses;
+    if (courses == null) {
+      if (_loading) return const Center(child: CircularProgressIndicator());
+      return _ErrorView(
+        message: _error ?? 'Unbekannter Fehler.',
+        onRetry: () {
+          setState(() {
+            _loading = true;
+            _error = null;
+          });
+          _load();
+        },
+        onOpenMoodle: _openMoodleCourses,
+      );
+    }
+    if (courses.isEmpty) {
+      return const Center(child: Text('Du bist in keinem Kurs eingeschrieben.'));
+    }
+    return RefreshIndicator(
+      onRefresh: _load,
+      child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        children: courses.map(_tile).toList(),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: fesAppBarTitle('Meine Kurse'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.open_in_browser),
+            tooltip: 'In Moodle öffnen',
+            onPressed: _openMoodleCourses,
+          ),
+        ],
+      ),
+      body: _buildBody(),
+    );
+  }
+}
+
+// ==========================================
 // 2. WEBVIEW ENGINE & DUAL ROUTING HANDLER
 // ==========================================
 class WebViewPage extends StatefulWidget {
   final String initialUrl;
   final String title;
-  const WebViewPage({super.key, required this.initialUrl, required this.title});
+  /// true = kein eigener AppBar/Zurück-Pfeil, für den Einsatz als Tab-Inhalt
+  /// (z. B. Startseite), wo die geladene Seite ihre eigene Kopfzeile mitbringt.
+  final bool embedded;
+
+  /// Für Seiten mit mehreren "Tagen" (z. B. Vertretungsplan heute/morgen):
+  /// URLs und ihre Kurz-Beschriftung, in derselben Reihenfolge. Wenn gesetzt,
+  /// zeigt die Kopfzeile Pfeile zum Wechseln, zusätzlich per Wischgeste.
+  final List<String>? dayUrls;
+  final List<String>? dayLabels;
+
+  /// true = bei jedem Laden einen Zeitstempel anhängen, damit garantiert nie
+  /// eine gecachte Version geladen wird (für Inhalte, die sich laufend
+  /// ändern, z. B. den Vertretungsplan).
+  final bool bustCache;
+
+  /// Blendet Moodles eigene Nachrichten-/Benachrichtigungs-Symbole in der
+  /// Kopfzeile aus, weil die App dafür schon eigene Reiter hat (nur für die
+  /// eingebettete Startseite gedacht, nicht für sonstige Moodle-Seiten).
+  final bool hideMoodleHeaderIcons;
+
+  const WebViewPage({
+    super.key,
+    required this.initialUrl,
+    required this.title,
+    this.embedded = false,
+    this.dayUrls,
+    this.dayLabels,
+    this.bustCache = false,
+    this.hideMoodleHeaderIcons = false,
+  });
 
   @override
   State<WebViewPage> createState() => _WebViewPageState();
@@ -3004,6 +3681,32 @@ class WebViewPage extends StatefulWidget {
 class _WebViewPageState extends State<WebViewPage> {
   late final WebViewController _controller;
   bool _isLoading = true;
+
+  /// Aktueller Index in widget.dayUrls (nur relevant, wenn gesetzt).
+  int _dayIndex = 0;
+
+  /// Hängt bei Bedarf einen Zeitstempel an, damit die URL garantiert nie aus
+  /// einem Cache bedient wird.
+  String _withCacheBust(String url) {
+    if (!widget.bustCache) return url;
+    final sep = url.contains('?') ? '&' : '?';
+    return '$url${sep}_ts=${DateTime.now().millisecondsSinceEpoch}';
+  }
+
+  /// Blendet die Nachrichten- und Benachrichtigungs-Symbole aus Moodles
+  /// eigener Kopfzeile aus (Boost-Theme-Klassen). Wirkt nur, wenn das
+  /// jeweilige Element existiert; auf anderen Seiten passiert einfach nichts.
+  void _hideMoodleHeaderIcons() {
+    _controller.runJavaScript('''
+      (function() {
+        var css = '.popover-region-messages, .popover-region-notifications '
+          + '{ display: none !important; }';
+        var style = document.createElement('style');
+        style.textContent = css;
+        document.head.appendChild(style);
+      })();
+    ''').catchError((e) => debugPrint('Header-Icons ausblenden fehlgeschlagen: $e'));
+  }
 
   /// true, sobald wir das Moodle-Loginformular abgeschickt haben und auf das
   /// Ergebnis warten. Erscheint danach erneut die Login-Seite, war der Login
@@ -3072,6 +3775,7 @@ class _WebViewPageState extends State<WebViewPage> {
             _log('fertig: $url');
             if (mounted) setState(() => _isLoading = false);
             _handleAutoLogin(url);
+            if (widget.hideMoodleHeaderIcons) _hideMoodleHeaderIcons();
           },
           onNavigationRequest: (NavigationRequest request) async {
             final url = request.url;
@@ -3123,8 +3827,17 @@ class _WebViewPageState extends State<WebViewPage> {
   /// erscheint. Klappt das nicht (z. B. Mindestabstand zwischen Schlüsseln,
   /// Admin-Konto), wird die Seite direkt geladen; der Formular-Auto-Login
   /// weiter unten fängt dann eine eventuelle Login-Seite ab (Fallback).
-  Future<void> _openInitialUrl() async {
-    var url = widget.initialUrl;
+  Future<void> _openInitialUrl() => _loadDay(0, initial: true);
+
+  /// Lädt einen bestimmten Tag (bzw. bei nur einer URL immer dieselbe),
+  /// jeweils mit Auto-Login-Versuch und optionalem Cache-Busting.
+  Future<void> _loadDay(int index, {bool initial = false}) async {
+    final urls = widget.dayUrls;
+    var url = urls != null ? urls[index] : widget.initialUrl;
+    url = _withCacheBust(url);
+    if (!initial) {
+      setState(() => _dayIndex = index);
+    }
     if (Uri.tryParse(url)?.host == kMoodleHost &&
         AuthService.instance.credentials.value != null) {
       final autologinUrl = await MoodleApi.buildAutologinUrl(url);
@@ -3135,6 +3848,12 @@ class _WebViewPageState extends State<WebViewPage> {
     }
     if (!mounted) return;
     await _controller.loadRequest(Uri.parse(url));
+  }
+
+  void _goToDay(int index) {
+    final urls = widget.dayUrls;
+    if (urls == null || index < 0 || index >= urls.length) return;
+    _loadDay(index);
   }
 
   // ------------------------------------------
@@ -3321,6 +4040,19 @@ class _WebViewPageState extends State<WebViewPage> {
   // Zurück-Navigation
   // ------------------------------------------
   Future<void> _goBackOrExit() async {
+    // Bei Tages-Seiten (z. B. Vertretungsplan) zählt die Tag-Reihenfolge,
+    // nicht der WebView-Verlauf: von "Morgen" geht's zu "Heute", von "Heute"
+    // direkt zurück zur vorherigen Seite (Startseite/Dashboard).
+    final days = widget.dayUrls;
+    if (days != null && days.length > 1) {
+      if (_dayIndex > 0) {
+        _goToDay(_dayIndex - 1);
+      } else if (mounted) {
+        Navigator.of(context).pop();
+      }
+      return;
+    }
+
     if (await _controller.canGoBack()) {
       _goingBack = true;
       // Sicherheitsnetz: Flag verfällt, falls die Zurück-Navigation kein
@@ -3416,46 +4148,85 @@ class _WebViewPageState extends State<WebViewPage> {
 
   @override
   Widget build(BuildContext context) {
+    final days = widget.dayUrls;
+    final hasDays = days != null && days.length > 1;
+
+    Widget webViewArea = Stack(
+      children: [
+        WebViewWidget(controller: _controller),
+        if (_autoLoggingIn) const Positioned.fill(child: _LoginOverlay()),
+      ],
+    );
+    if (hasDays) {
+      // Nach links wischen = nächster Tag; nach rechts wischen = wie der
+      // Zurück-Pfeil (ein Tag zurück, bei "Heute" die Seite verlassen).
+      webViewArea = GestureDetector(
+        onHorizontalDragEnd: (details) {
+          final v = details.primaryVelocity ?? 0;
+          if (v < -200) {
+            _goToDay(_dayIndex + 1);
+          } else if (v > 200) {
+            _goBackOrExit();
+          }
+        },
+        child: webViewArea,
+      );
+    }
+
+    final content = Column(
+      children: [
+        if (_isLoading) const LinearProgressIndicator(minHeight: 3),
+        Expanded(child: webViewArea),
+      ],
+    );
+
+    final title = hasDays && widget.dayLabels != null
+        ? '${widget.title} – ${widget.dayLabels![_dayIndex]}'
+        : widget.title;
+
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, result) async {
         if (didPop) return;
         await _goBackOrExit();
       },
-      child: Scaffold(
-        appBar: AppBar(
-          title: Text(widget.title),
-          leading: IconButton(
-            icon: const Icon(Icons.arrow_back),
-            onPressed: _goBackOrExit,
-          ),
-          actions: [
-            IconButton(
-              icon: const Icon(Icons.home),
-              tooltip: 'Zum Dashboard',
-              onPressed: () => Navigator.of(context).pop(),
-            ),
-            IconButton(
-              icon: const Icon(Icons.refresh),
-              tooltip: 'Neu laden',
-              onPressed: () => _controller.reload(),
-            ),
-          ],
-        ),
-        body: Column(
-          children: [
-            if (_isLoading) const LinearProgressIndicator(minHeight: 3),
-            Expanded(
-              child: Stack(
-                children: [
-                  WebViewWidget(controller: _controller),
-                  if (_autoLoggingIn) const Positioned.fill(child: _LoginOverlay()),
+      child: widget.embedded
+          ? content
+          : Scaffold(
+              appBar: AppBar(
+                title: fesAppBarTitle(title),
+                leading: IconButton(
+                  icon: const Icon(Icons.arrow_back),
+                  onPressed: _goBackOrExit,
+                ),
+                actions: [
+                  if (hasDays) ...[
+                    IconButton(
+                      icon: const Icon(Icons.chevron_left),
+                      tooltip: 'Vorheriger Tag',
+                      onPressed: _dayIndex > 0 ? () => _goToDay(_dayIndex - 1) : null,
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.chevron_right),
+                      tooltip: 'Nächster Tag',
+                      onPressed:
+                          _dayIndex < days.length - 1 ? () => _goToDay(_dayIndex + 1) : null,
+                    ),
+                  ] else
+                    IconButton(
+                      icon: const Icon(Icons.home),
+                      tooltip: 'Zum Dashboard',
+                      onPressed: () => Navigator.of(context).pop(),
+                    ),
+                  IconButton(
+                    icon: const Icon(Icons.refresh),
+                    tooltip: 'Neu laden',
+                    onPressed: () => _loadDay(_dayIndex),
+                  ),
                 ],
               ),
+              body: content,
             ),
-          ],
-        ),
-      ),
     );
   }
 }
